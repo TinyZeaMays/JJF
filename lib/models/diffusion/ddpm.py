@@ -14,7 +14,7 @@ class GaussianDiffusion(nn.Module):
                  image_size: Union[Tuple[int, int], int],
                  channels: int,
                  betas: Tensor,
-                 loss_type: str = 'l2',
+                 loss_type: str = 'huber',
                  ) -> None:
         super().__init__()
         self.shape = [batch_size, channels, image_size, image_size] if isinstance(image_size, int) \
@@ -24,7 +24,6 @@ class GaussianDiffusion(nn.Module):
 
         self.betas = nn.Parameter(betas, requires_grad=False)
 
-        # define alphas
         alphas = 1. - betas
         self.alphas = nn.Parameter(alphas, requires_grad=False)
 
@@ -37,7 +36,6 @@ class GaussianDiffusion(nn.Module):
         sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
         self.sqrt_recip_alphas = nn.Parameter(sqrt_recip_alphas, requires_grad=False)
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
         sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
         self.sqrt_alphas_cumprod = nn.Parameter(sqrt_alphas_cumprod, requires_grad=False)
 
@@ -107,11 +105,21 @@ class GaussianDiffusion(nn.Module):
 
         return loss
 
+    def forward(self, images: Tensor) -> Union[Tensor, List[np.ndarray]]:
+        if self.train():
+            device = self.betas.device
+            timesteps = torch.randint(0, self.num_timesteps, (images.shape[0],), device=device).long()
+            loss = self.p_loss(images, timesteps)
+            return loss
+        else:
+            return self.p_sample_loop()
+
 
 if __name__ == '__main__':
     from lib.models.diffusion.beta_schedule import linear_beta_schedule
 
     linear_betas = linear_beta_schedule(100)
-    ddpm = GaussianDiffusion(4, (256, 256), 3, linear_betas)
+    ddpm = GaussianDiffusion(4, (256, 128), 3, linear_betas)
     print(ddpm.p_loss(torch.rand(4, 3, 256, 128), [1, 2, 3, 4]))
     print(ddpm.p_sample_loop()[-1].shape)
+    print(ddpm(torch.rand((6, 3, 256, 128))))
