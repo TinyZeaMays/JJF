@@ -8,9 +8,9 @@ class BilateralSolver(nn.Module):
     def __init__(self,
                  reference: np.ndarray,
                  target: np.ndarray,
-                 sigma_space: int = 32,
-                 sigma_luma: int = 8,
-                 lam: int = 128,
+                 sigma_space: float = 32,
+                 sigma_luma: float = 8,
+                 lam: float = 128,
                  ) -> None:
         super().__init__()
         self.image_size = (reference.shape[1], reference.shape[0])
@@ -49,34 +49,13 @@ class BilateralSolver(nn.Module):
         return loss
 
 
-def bilateral_solver(reference: np.ndarray,
-                     target: np.ndarray,
-                     sigma_space: int = 8,
-                     sigma_luma: int = 4,
-                     lam: int = 128,
-                     ) -> np.ndarray:
-    solver = BilateralSolver(reference, target, sigma_space, sigma_luma, lam)
-    solver.cuda()
-    optimizer = torch.optim.SGD(solver.parameters(), lr=5e-3)
-    for _ in tqdm(range(10000)):
-        optimizer.zero_grad()
-        loss = solver()
-        loss.backward()
-        optimizer.step()
-        print(loss)
-
-    output = torch.Tensor(solver.output).view((target.shape[0], target.shape[1])).detach().cpu().numpy() * 255
-
-    return output
-
-
 class BilateralSolverLocal(nn.Module):
     def __init__(self,
                  reference: np.ndarray,
                  target: np.ndarray,
-                 sigma_space: int = 32,
-                 sigma_luma: int = 8,
-                 lam: int = 128,
+                 sigma_space: float = 32,
+                 sigma_luma: float = 8,
+                 lam: float = 128,
                  kernel_size: int = 21
                  ) -> None:
         super().__init__()
@@ -106,8 +85,10 @@ class BilateralSolverLocal(nn.Module):
         position_y_ij = self.conv_ij(position_y)
         position_ij = - (position_x_ij ** 2 + position_y_ij ** 2) / (2 * sigma_space ** 2)
 
-        reference_ij = self.conv_ij(torch.Tensor(reference)[None, None, :, :])
-        reference_ij = - reference_ij ** 2 / (2 * sigma_luma ** 2)
+        reference_ij = 0
+        for c in range(3):
+            reference_c_ij = self.conv_ij(torch.Tensor(reference[:, :, c])[None, None, :, :])
+            reference_ij -= reference_c_ij ** 2 / (2 * sigma_luma ** 2)
 
         self.w_ij = nn.Parameter(torch.exp(position_ij + reference_ij), requires_grad=False)
         self.target = nn.Parameter(torch.Tensor(target / 255.), requires_grad=False)
@@ -128,15 +109,15 @@ class BilateralSolverLocal(nn.Module):
 
 def bilateral_solver_local(reference: np.ndarray,
                            target: np.ndarray,
-                           sigma_space: int = 8,
-                           sigma_luma: int = 4,
-                           lam: int = 128,
+                           sigma_space: float = 32,
+                           sigma_luma: float = 8,
+                           lam: float = 32,
                            kernel_size: int = 21,
                            ) -> np.ndarray:
-    solver = BilateralSolverLocal(reference, target, sigma_space, sigma_luma, lam)
+    solver = BilateralSolverLocal(reference, target, sigma_space, sigma_luma, lam, kernel_size)
     solver.cuda()
-    optimizer = torch.optim.SGD(solver.parameters(), lr=1e-4)
-    for _ in tqdm(range(10000)):
+    optimizer = torch.optim.Adam(solver.parameters(), lr=1e-3)
+    for _ in tqdm(range(2000)):
         optimizer.zero_grad()
         loss = solver()
         loss.backward()
@@ -151,10 +132,8 @@ def bilateral_solver_local(reference: np.ndarray,
 if __name__ == '__main__':
     import cv2
 
-    refer = cv2.imread('reference.png', 0)
-    # refer = cv2.resize(refer, (176, 176))
+    refer = cv2.imread('reference.png')
     tgt = cv2.imread('target.png', 0)
-    # tgt = cv2.resize(tgt, (176, 176))
 
-    out = bilateral_solver_local(refer, tgt)
+    out = bilateral_solver_local(refer, tgt, lam=1, sigma_space=32, sigma_luma=1)
     cv2.imwrite('result.png', out)
