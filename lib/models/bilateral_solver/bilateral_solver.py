@@ -86,7 +86,9 @@ class BilateralSolverLocal(nn.Module):
         position_ij = - (position_x_ij ** 2 + position_y_ij ** 2) / (2 * sigma_space ** 2)
 
         reference_ij = 0
-        for c in range(3):
+        if len(reference.shape) == len(target.shape):
+            reference = reference[:, :, None]
+        for c in range(reference.shape[-1]):
             reference_c_ij = self.conv_ij(torch.Tensor(reference[:, :, c])[None, None, :, :])
             reference_ij -= reference_c_ij ** 2 / (2 * sigma_luma ** 2)
 
@@ -103,6 +105,81 @@ class BilateralSolverLocal(nn.Module):
     def forward(self) -> Tensor:
         loss = self.image_size[0] * self.image_size[1] * self.lam * torch.mean(
             self.w_ij * self.conv_ij(self.output[None, None, :, :]) ** 2
+        ) + torch.mean((self.output - self.target) ** 2)
+        return loss
+
+
+class BilateralSolverLocal3D(nn.Module):
+    def __init__(self,
+                 reference: np.ndarray,
+                 target: np.ndarray,
+                 sigma_space: float = 32,
+                 sigma_luma: float = 8,
+                 lam: float = 128,
+                 space_kernel_size: int = 21,
+                 time_kernel_size: int = 5,
+                 ) -> None:
+        super().__init__()
+        weight = torch.zeros((
+            space_kernel_size * space_kernel_size * time_kernel_size - 1, 1,
+            time_kernel_size, space_kernel_size, space_kernel_size
+        ))
+        num = 0
+        for i in range(space_kernel_size):
+            for j in range(space_kernel_size):
+                for k in range(time_kernel_size):
+                    if i == j == (space_kernel_size - 1) // 2 and k == (time_kernel_size - 1) // 2:
+                        continue
+                    weight[num, 0, k, i, j] = -1
+                    weight[
+                        num, 0, (time_kernel_size - 1) // 2, (space_kernel_size - 1) // 2, (space_kernel_size - 1) // 2
+                    ] = 1
+                    num += 1
+
+        self.conv = nn.Conv3d(
+            1, space_kernel_size * space_kernel_size * time_kernel_size - 1,
+            (time_kernel_size, space_kernel_size, space_kernel_size),
+            padding=((time_kernel_size - 1) // 2, (space_kernel_size - 1) // 2, (space_kernel_size - 1) // 2),
+            padding_mode='replicate'
+        )
+        self.conv.weight = nn.Parameter(weight, requires_grad=False)
+
+        self.image_size = (reference.shape[0], reference.shape[2], reference.shape[1])
+
+        position_x = torch.linspace(
+            0, self.image_size[1], self.image_size[1]
+        )[None, None, :].repeat((self.image_size[0], self.image_size[2], 1))[None, None, :, :, :]
+        position_y = torch.linspace(
+            0, self.image_size[2], self.image_size[2]
+        )[None, :, None].repeat((self.image_size[0], 1, self.image_size[1]))[None, None, :, :, :]
+        position_z = torch.linspace(
+            0, self.image_size[0], self.image_size[0]
+        )[:, None, None].repeat((1, self.image_size[2], self.image_size[1]))[None, None, :, :, :]
+        position_x_ij = self.conv_ij(position_x)
+        position_y_ij = self.conv_ij(position_y)
+        position_z_ij = self.conv_ij(position_z)
+        position_ij = - (position_x_ij ** 2 + position_y_ij ** 2 + position_z_ij ** 2) / (2 * sigma_space ** 2)
+
+        reference_ij = 0
+        if len(reference.shape) == len(target.shape):
+            reference = reference[:, :, :, None]
+        for c in range(reference.shape[-1]):
+            reference_c_ij = self.conv_ij(torch.Tensor(reference[:, :, :, c])[None, None, :, :, :])
+            reference_ij -= reference_c_ij ** 2 / (2 * sigma_luma ** 2)
+
+        self.w_ij = nn.Parameter(torch.exp(position_ij + reference_ij), requires_grad=False)
+        self.target = nn.Parameter(torch.Tensor(target / 255.), requires_grad=False)
+        self.output = nn.Parameter(torch.Tensor(target / 255.), requires_grad=True)
+        self.lam = lam
+
+    def conv_ij(self, inp: Tensor) -> Tensor:
+        batch_size = inp.shape[0]
+        out = self.conv(inp)
+        return out.view((batch_size, -1))
+
+    def forward(self) -> Tensor:
+        loss = self.image_size[0] * self.image_size[1] * self.image_size[2] * self.lam * torch.mean(
+            self.w_ij * self.conv_ij(self.output[None, None, :, :, :]) ** 2
         ) + torch.mean((self.output - self.target) ** 2)
         return loss
 
@@ -129,11 +206,45 @@ def bilateral_solver_local(reference: np.ndarray,
     return output
 
 
+def bilateral_solver_local_3d(reference: np.ndarray,
+                              target: np.ndarray,
+                              sigma_space: float = 32,
+                              sigma_luma: float = 8,
+                              lam: float = 32,
+                              space_kernel_size: int = 21,
+                              time_kernel_size: int = 5,
+                           ) -> np.ndarray:
+    solver = BilateralSolverLocal3D(
+        reference, target, sigma_space, sigma_luma, lam, space_kernel_size, time_kernel_size
+    )
+    solver.cuda()
+    optimizer = torch.optim.Adam(solver.parameters(), lr=1e-3)
+    for _ in tqdm(range(1000)):
+        optimizer.zero_grad()
+        loss = solver()
+        loss.backward()
+        optimizer.step()
+        print(loss)
+
+    output = torch.Tensor(solver.output).view(
+        (target.shape[0], target.shape[1], target.shape[2])
+    ).detach().cpu().numpy() * 255
+
+    return output
+
+
 if __name__ == '__main__':
+    # 2d
+    # import cv2
+    #
+    # refer = cv2.imread('reference.png')
+    # tgt = cv2.imread('target.png', 0)
+    #
+    # out = bilateral_solver_local(refer, tgt, lam=1, sigma_space=32, sigma_luma=1)
+    # cv2.imwrite('result.png', out)
+
+    # 3d
     import cv2
-
-    refer = cv2.imread('reference.png')
-    tgt = cv2.imread('target.png', 0)
-
-    out = bilateral_solver_local(refer, tgt, lam=1, sigma_space=32, sigma_luma=1)
-    cv2.imwrite('result.png', out)
+    refer = np.stack([cv2.resize(cv2.imread('reference.png'), (128, 128))] * 5, axis=0)
+    tgt = np.stack([cv2.resize(cv2.imread('target.png', 0), (128, 128))] * 5, axis=0)
+    out = bilateral_solver_local_3d(refer, tgt)
